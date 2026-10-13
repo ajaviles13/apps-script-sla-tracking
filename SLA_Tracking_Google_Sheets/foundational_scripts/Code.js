@@ -51,6 +51,7 @@ function getColumnMapping() {
     // Template-specific columns
     IS_URGENT: isPDFType ? null : 10,  // Column J (Word_Type only)
     QA_DELIVERY_BY: isPDFType ? 10 : 11,  // Column J (PDF) or K (Word)
+    COMMENT: isPDFType ? 11 : 12,  // Column K (PDF) or L (Word)
     STATUS: isPDFType ? 12 : 13  // Column L (PDF) or M (Word)
     
   };
@@ -934,9 +935,6 @@ function updateSheetWithDeliveredFiles(foundFiles, sheetName) {
   // Determine template type for calculateStatus and calculateSLA
   const templateType = CONFIG.TEMPLATE_TYPE === "PDF_Type" ? "PDF" : "Word";
   
-  // SLA MET column is ALWAYS column I (9)
-  const SLA_MET_COLUMN = 9;
-  
   // Step 1: Read all necessary data upfront in ONE batch operation
   const rowIndices = foundFiles.map(file => file.rowIndex);
   const minRow = Math.min(...rowIndices);
@@ -945,6 +943,9 @@ function updateSheetWithDeliveredFiles(foundFiles, sheetName) {
   // Read columns E (Date Received) and F (Time Received) for all rows
   const dateReceivedData = sheet.getRange(minRow, cols.DATE_RECEIVED, maxRow - minRow + 1, 1).getValues();
   const timeReceivedData = sheet.getRange(minRow, cols.TIME_RECEIVED, maxRow - minRow + 1, 1).getValues();
+  
+  // Read Comment column (K for PDF, L for Word) - used to label NA results
+  const commentData = sheet.getRange(minRow, cols.COMMENT, maxRow - minRow + 1, 1).getDisplayValues();
   
   // Read column J (isUrgent) if Word_Type
   let isUrgentData = [];
@@ -966,6 +967,9 @@ function updateSheetWithDeliveredFiles(foundFiles, sheetName) {
     if (CONFIG.TEMPLATE_TYPE === "Word_Type") {
       isUrgent = isUrgentData[offset][0] || "";
     }
+    
+    // Get Comment for this row (determines Molina vs. Auracom NA label)
+    const comment = commentData[offset][0] || "";
     
     // Step 2.1: Calculate Status
     let statusValue;
@@ -998,7 +1002,8 @@ function updateSheetWithDeliveredFiles(foundFiles, sheetName) {
       slaValue = calculateSLA(
         templateType,
         isUrgent,  // For PDF this will be empty string, for Word it will be YES/NO
-        statusValue  // The calculated Status value
+        statusValue,  // The calculated Status value
+        comment  // Comment value - only used to label NA results
       );
       
       // Check if calculateSLA returned an error or empty
@@ -1013,7 +1018,7 @@ function updateSheetWithDeliveredFiles(foundFiles, sheetName) {
     // Step 2.3: Write Status (column L or M)
     sheet.getRange(file.rowIndex, cols.STATUS).setValue(statusValue);
     
-    // Step 2.4: Write G:I together (Date Delivered, Time Delivered, SLA MET)
+    // Step 2.4: Write G:I together (Date Delivered, Time Delivered, SLA Met)
     sheet.getRange(file.rowIndex, cols.DATE_DELIVERED, 1, 3).setValues([[file.date, file.time, slaValue]]);
   });
   

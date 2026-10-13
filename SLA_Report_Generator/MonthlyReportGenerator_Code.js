@@ -23,7 +23,7 @@ const REPORT_CONFIG = {
       "Time file received (EST)",
       "Date file delivered (EST)",
       "Time file delivered (EST)",
-      "SLA MET (Y/N/NA)",
+      "SLA MET",
       "isUrgent?",
       "QA Delivery by",
       "Comment",
@@ -245,7 +245,7 @@ const REPORT_CONFIG = {
         timeReceivedValue,                            // Time file received (EST)
         dateDeliveredValue,                           // Date file delivered (EST)
         timeDeliveredValue,                           // Time file delivered (EST)
-        row[columnMap.SLA_MET - 1] || '',             // SLA MET (Y/N/NA)
+        row[columnMap.SLA_MET - 1] || '',             // SLA MET
         isUrgentValue,                                // isUrgent? (YES/NO for Word, N/A for PDF)
         row[columnMap.QA_DELIVERY_BY - 1] || '',      // QA Delivery by
         row[columnMap.COMMENT - 1] || '',             // Comment
@@ -486,7 +486,7 @@ const REPORT_CONFIG = {
           160,  // Time file received (EST)
           160,  // Date file delivered (EST)
           165,  // Time file delivered (EST)
-          125,  // SLA MET (Y/N/NA)
+          125,  // SLA MET
           100,  // isUrgent?
           105,  // QA Delivery by
           585,  // Comment
