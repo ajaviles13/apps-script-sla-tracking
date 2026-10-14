@@ -915,18 +915,21 @@ function searchFolderForDeliveredFiles(folderId, searchList) {
 // ===================================================================
 // UPDATE SHEET WITH DELIVERED FILES - WITH STATUS AND SLA CALCULATION
 // ===================================================================
+// Returns the file names that were SKIPPED because their row no longer
+// holds the expected file name (tab sorted or rows deleted between the
+// search-list build and this write). The caller reports them as Not Found.
 
 function updateSheetWithDeliveredFiles(foundFiles, sheetName) {
   const ss = SpreadsheetApp.getActiveSpreadsheet();
   const sheet = ss.getSheetByName(sheetName);
-  
+
   if (!sheet) {
     throw new Error(`Sheet "${sheetName}" not found`);
   }
-  
+
   if (foundFiles.length === 0) {
     Logger.log('No files to update');
-    return;
+    return [];
   }
   
   // Get column mapping
@@ -940,6 +943,9 @@ function updateSheetWithDeliveredFiles(foundFiles, sheetName) {
   const minRow = Math.min(...rowIndices);
   const maxRow = Math.max(...rowIndices);
   
+  // Read column B (File Name) for all rows - used to confirm each row still holds the expected file
+  const fileNameData = sheet.getRange(minRow, cols.FILE_NAME, maxRow - minRow + 1, 1).getValues();
+
   // Read columns E (Date Received) and F (Time Received) for all rows
   const dateReceivedData = sheet.getRange(minRow, cols.DATE_RECEIVED, maxRow - minRow + 1, 1).getValues();
   const timeReceivedData = sheet.getRange(minRow, cols.TIME_RECEIVED, maxRow - minRow + 1, 1).getValues();
@@ -953,11 +959,22 @@ function updateSheetWithDeliveredFiles(foundFiles, sheetName) {
     isUrgentData = sheet.getRange(minRow, cols.IS_URGENT, maxRow - minRow + 1, 1).getValues();
   }
   
+  // Files whose row moved since the search list was built (skipped, reported as Not Found)
+  const movedFiles = [];
+
   // Step 2: Process each file - calculate Status, SLA, and write data
   foundFiles.forEach(file => {
     // Get the offset from minRow to access the correct array index
     const offset = file.rowIndex - minRow;
-    
+
+    // Step 2.0: Row safety check - skip if this row no longer holds the expected file
+    const fileNameInRow = String(fileNameData[offset][0]);
+    if (fileNameInRow !== file.fileName) {
+      Logger.log(`Row ${file.rowIndex} skipped: expected "${file.fileName}" but found "${fileNameInRow}" (tab sorted or rows changed)`);
+      movedFiles.push(file.fileName);
+      return;
+    }
+
     // Get existing received data for this row
     const dateReceived = dateReceivedData[offset][0];
     const timeReceived = timeReceivedData[offset][0];
@@ -1022,14 +1039,16 @@ function updateSheetWithDeliveredFiles(foundFiles, sheetName) {
     sheet.getRange(file.rowIndex, cols.DATE_DELIVERED, 1, 3).setValues([[file.date, file.time, slaValue]]);
   });
   
-  Logger.log(`Updated ${foundFiles.length} rows with delivered timestamps, SLA, and status`);
+  Logger.log(`Updated ${foundFiles.length - movedFiles.length} rows with delivered timestamps, SLA, and status (${movedFiles.length} skipped - row moved)`);
+  return movedFiles;
 }
 
 // ===================================================================
 // MAIN PROCESS FUNCTION
 // ===================================================================
+// Called through the locked wrapper processEgnyteExtraction() in RunLock.gs
 
-function processEgnyteExtraction(directLink, deliveryType, destinationTab) {
+function processEgnyteExtractionCore_(directLink, deliveryType, destinationTab) {
   try {
     // Add at the very beginning of processEgnyteExtraction
     const startTime = new Date().getTime();
@@ -1177,25 +1196,29 @@ function processEgnyteExtraction(directLink, deliveryType, destinationTab) {
 // ===================================================================
 // EXECUTE DELIVERED SEARCH (CALLED FROM FRONTEND WITH PROGRESS)
 // ===================================================================
+// Called through the locked wrapper executeDeliveredSearch() in RunLock.gs
 
-function executeDeliveredSearch(folderId, searchListData, destinationTab, startTime) {
+function executeDeliveredSearchCore_(folderId, searchListData, destinationTab, startTime) {
   try {
     const searchList = JSON.parse(searchListData);
-    
+
     // Perform the search
     const result = searchFolderForDeliveredFiles(folderId, searchList);
-    
-    // Update sheet with found files
+
+    // Update sheet with found files (returns files skipped because their row moved)
+    let movedFiles = [];
     if (result.found.length > 0) {
-      updateSheetWithDeliveredFiles(result.found, destinationTab);
+      movedFiles = updateSheetWithDeliveredFiles(result.found, destinationTab) || [];
     }
 
     // Calculate execution time
     const elapsedTime = ((new Date().getTime() - startTime) / 1000).toFixed(2);
-    
-    // Extract file names for report
-    const updatedFiles = result.found.map(f => f.fileName);
-    const notFoundFiles = result.notFound.map(f => f.fileName);
+
+    // Extract file names for report (moved rows are reported as Not Found)
+    const updatedFiles = result.found
+      .map(f => f.fileName)
+      .filter(name => !movedFiles.includes(name));
+    const notFoundFiles = result.notFound.map(f => f.fileName).concat(movedFiles);
     
     // Always return report data (whether all found or some not found)
     return {
@@ -1223,8 +1246,9 @@ function executeDeliveredSearch(folderId, searchListData, destinationTab, startT
 // ===================================================================
 // PROCESS RECEIVED WITH OVERWRITE SELECTIONS
 // ===================================================================
+// Called through the locked wrapper processReceivedWithOverwrite() in RunLock.gs
 
-function processReceivedWithOverwrite(selectedFileNames, allFilesData, folderPath, destinationTab, startTime) {
+function processReceivedWithOverwriteCore_(selectedFileNames, allFilesData, folderPath, destinationTab, startTime) {
   try {
     const ss = SpreadsheetApp.getActiveSpreadsheet();
     const sheet = ss.getSheetByName(destinationTab);
