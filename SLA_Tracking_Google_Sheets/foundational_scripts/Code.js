@@ -52,9 +52,130 @@ function getColumnMapping() {
     IS_URGENT: isPDFType ? null : 10,  // Column J (Word_Type only)
     QA_DELIVERY_BY: isPDFType ? 10 : 11,  // Column J (PDF) or K (Word)
     COMMENT: isPDFType ? 11 : 12,  // Column K (PDF) or L (Word)
-    STATUS: isPDFType ? 12 : 13  // Column L (PDF) or M (Word)
-    
+    STATUS: isPDFType ? 12 : 13,  // Column L (PDF) or M (Word)
+
+    // Formula columns copied onto rows added by the script
+    FORMULA_FIRST: isPDFType ? 18 : 19,  // Column R (PDF) or S (Word)
+    FORMULA_COUNT: 4                     // R:U (PDF) or S:V (Word)
   };
+}
+
+// ===================================================================
+// ROW PLACEMENT - APPEND AFTER LAST FILE NAME, ADD ROWS WHEN NEEDED
+// ===================================================================
+// A row is "empty" when its File name cell (Column B) has no text or value.
+// New files always go directly after the last row with a File name. Gaps
+// higher up are never filled, so existing rows can't be written over.
+
+const ROW_CONFIG = {
+  DATA_START_ROW: 2,          // Row 1 is the header
+  RESET_FILL_COLUMNS: 8,      // A:H fill reset to white on added rows (same as DeleteAllRowData)
+  RESET_FILL_COLOR: '#ffffff'
+};
+
+function isFileNameEmpty_(value) {
+  return value === null || value === undefined || String(value).trim() === '';
+}
+
+// Last row (1-based) with a File name in Column B. Returns 1 (the header) if none.
+function getLastFileNameRow_(sheet) {
+  const columnB = sheet.getRange('B:B').getValues();
+  for (let i = columnB.length - 1; i >= ROW_CONFIG.DATA_START_ROW - 1; i--) {
+    if (!isFileNameEmpty_(columnB[i][0])) {
+      return i + 1;
+    }
+  }
+  return ROW_CONFIG.DATA_START_ROW - 1;
+}
+
+// Makes sure `count` empty rows exist directly after the last File name and
+// returns where to write. Rows are inserted INSIDE the sheet's existing
+// ranges (above the last row) so filters, dropdowns and conditional formatting
+// grow with them; formatting, dropdowns and the formula columns are then
+// copied onto the new rows.
+function prepareAppendRows_(sheet, count) {
+  const cols = getColumnMapping();
+  const lastUsedRow = getLastFileNameRow_(sheet);
+  const startRow = lastUsedRow + 1;
+  const endRow = startRow + count - 1;
+  const maxRows = sheet.getMaxRows();
+  const rowsNeeded = endRow - maxRows;
+
+  if (rowsNeeded > 0) {
+    let firstNewRow;
+
+    if (maxRows < ROW_CONFIG.DATA_START_ROW) {
+      // Only the header exists - nothing to insert inside of
+      sheet.insertRowsAfter(maxRows, rowsNeeded);
+      firstNewRow = maxRows + 1;
+    } else {
+      sheet.insertRowsBefore(maxRows, rowsNeeded);
+      // The original last row is now at maxRows + rowsNeeded
+      if (lastUsedRow === maxRows) {
+        // That last row holds a file - move it back above the new blank rows
+        const shiftedRow = maxRows + rowsNeeded;
+        sheet.moveRows(sheet.getRange(`${shiftedRow}:${shiftedRow}`), maxRows);
+        firstNewRow = maxRows + 1;
+      } else {
+        firstNewRow = maxRows;
+      }
+    }
+
+    copyRowSetupToNewRows_(sheet, firstNewRow, rowsNeeded, cols);
+    Logger.log(`Added ${rowsNeeded} row(s) to "${sheet.getName()}" at rows ${firstNewRow}-${firstNewRow + rowsNeeded - 1}`);
+  }
+
+  return { startRow: startRow, endRow: endRow, rowsAdded: Math.max(rowsNeeded, 0) };
+}
+
+// Copies formatting, dropdowns and the formula columns from a neighbouring
+// row onto newly added rows, then resets the A:H fill to white.
+function copyRowSetupToNewRows_(sheet, firstNewRow, numRows, cols) {
+  const lastNewRow = firstNewRow + numRows - 1;
+  let sourceRow = firstNewRow - 1;
+  if (sourceRow < ROW_CONFIG.DATA_START_ROW) {
+    sourceRow = lastNewRow + 1;
+  }
+  if (sourceRow > sheet.getMaxRows()) {
+    Logger.log('No data row to copy formatting from - new rows left unformatted');
+    return;
+  }
+
+  const lastCol = sheet.getMaxColumns();
+  const source = sheet.getRange(sourceRow, 1, 1, lastCol);
+  const target = sheet.getRange(firstNewRow, 1, numRows, lastCol);
+  source.copyTo(target, SpreadsheetApp.CopyPasteType.PASTE_FORMAT, false);
+  source.copyTo(target, SpreadsheetApp.CopyPasteType.PASTE_DATA_VALIDATION, false);
+
+  if (cols.FORMULA_FIRST + cols.FORMULA_COUNT - 1 <= lastCol) {
+    sheet.getRange(sourceRow, cols.FORMULA_FIRST, 1, cols.FORMULA_COUNT)
+      .copyTo(
+        sheet.getRange(firstNewRow, cols.FORMULA_FIRST, numRows, cols.FORMULA_COUNT),
+        SpreadsheetApp.CopyPasteType.PASTE_FORMULA,
+        false
+      );
+  }
+
+  sheet.getRange(firstNewRow, 1, numRows, ROW_CONFIG.RESET_FILL_COLUMNS)
+    .setBackground(ROW_CONFIG.RESET_FILL_COLOR);
+}
+
+// Safety net: confirm every target row still has an empty File name right
+// before writing. If not, stop the whole import and list the rows.
+function assertRowsEmpty_(sheet, startRow, count) {
+  const values = sheet.getRange(startRow, 2, count, 1).getValues();
+  const usedRows = [];
+  values.forEach((row, i) => {
+    if (!isFileNameEmpty_(row[0])) {
+      usedRows.push(`row ${startRow + i} ("${row[0]}")`);
+    }
+  });
+  if (usedRows.length > 0) {
+    throw new Error(
+      `Import stopped - nothing was written. These rows already contain a File name: ${usedRows.join(', ')}. ` +
+      'Please try again; if this keeps happening, contact support.'
+    );
+  }
 }
 
 // ===================================================================
@@ -565,19 +686,12 @@ function writeDataToSheet(folderData, sheetName, deliveryType) {
   
   Logger.log(`Folder path: ${folderData.path}, isUrgentFolder: ${isUrgentFolder}`);
   
-  // Find the next available row in Column B (File name)
-  const columnB = sheet.getRange('B:B').getValues();
-  let nextRow = 1;
-  for (let i = 0; i < columnB.length; i++) {
-    if (columnB[i][0] === '' || columnB[i][0] === null) {
-      nextRow = i + 1;
-      break;
-    }
-  }
-  if (nextRow === 1) {
-    nextRow = columnB.length + 1;
-  }
-  
+  // Place new files directly after the last row with a File name,
+  // adding rows to the tab if there aren't enough
+  const placement = prepareAppendRows_(sheet, files.length);
+  const nextRow = placement.startRow;
+  assertRowsEmpty_(sheet, nextRow, files.length);
+
   // Prepare column-specific data to write (as 2D arrays)
   const fileNamesColumn = [];  // Column B - will be written first as the 'anchor'
   const receivedDates = [];    // Column E
@@ -648,9 +762,11 @@ function writeDataToSheet(folderData, sheetName, deliveryType) {
   // This structure ensures only Columns A, B, C, D, E, F, G, H, and (conditionally) J are updated.
   // Columns I, K, L, etc., are completely untouched, preserving any formulas or existing data.
 
-  // Return array of file names
+  Logger.log(`Wrote ${dataRowCount} file(s) to "${sheetName}" rows ${nextRow}-${endRow} (${placement.rowsAdded} row(s) added)`);
+
+  // Return file names and how many rows had to be added to the tab
   const fileNames = files.map(file => stripFileExtension(file.name || ''));
-  return fileNames; 
+  return { fileNames: fileNames, rowsAdded: placement.rowsAdded };
 }
 
 // ===================================================================
@@ -1167,11 +1283,12 @@ function processEgnyteExtractionCore_(directLink, deliveryType, destinationTab) 
       } else {
         Logger.log('No duplicates - processing normally');
         // No duplicates, process normally
-        const newFileNames = writeDataToSheet(folderData, destinationTab, deliveryType);
+        const writeResult = writeDataToSheet(folderData, destinationTab, deliveryType);
+        const newFileNames = writeResult.fileNames;
 
         // Calculate execution time
         const elapsedTime = ((new Date().getTime() - startTime) / 1000).toFixed(2);
-        
+
         return {
           success: true,
           showReceivedReport: true,
@@ -1179,6 +1296,7 @@ function processEgnyteExtractionCore_(directLink, deliveryType, destinationTab) 
           newFiles: newFileNames,
           overwrittenFiles: [],
           totalFiles: newFileNames.length,
+          rowsAdded: writeResult.rowsAdded,
           executionTime: elapsedTime
         };
       }
@@ -1282,79 +1400,79 @@ function processReceivedWithOverwriteCore_(selectedFileNames, allFilesData, fold
     const columnEData = lastRow > 0 ? sheet.getRange('E1:E' + lastRow).getDisplayValues() : [];
     const columnFData = lastRow > 0 ? sheet.getRange('F1:F' + lastRow).getDisplayValues() : [];
     
+    // Pass 1: sort files into overwrites (existing rows) and new files - no writes yet
+    const overwrites = [];   // { row, fileName, estDateTime }
+    const newFiles = [];     // { fileName, estDateTime }
+    const queuedNewNames = new Set();
+
     files.forEach(file => {
       const fileNameOriginal = file.name || '';
       const fileName = stripFileExtension(fileNameOriginal);
       const uploadedTimestamp = file.uploaded || 0;
       const estDateTime = convertEpochToEST(uploadedTimestamp);
-      
+
       // Check if this file is a duplicate
-      let isDuplicate = false;
       let duplicateRow = -1;
-      
       for (let i = 0; i < columnBData.length; i++) {
         if (columnBData[i][0] === fileName && (columnEData[i][0] || columnFData[i][0])) {
-          isDuplicate = true;
           duplicateRow = i + 1;
           break;
         }
       }
-      
-      if (isDuplicate) {
-        // Check if user selected to overwrite this file
+
+      if (duplicateRow !== -1) {
+        // Duplicate: overwrite only if the user selected it
         if (selectedFileNames.includes(fileName)) {
-          // Overwrite columns E & F
-          sheet.getRange(duplicateRow, cols.DATE_RECEIVED).setValue(estDateTime.date);
-          sheet.getRange(duplicateRow, cols.TIME_RECEIVED).setValue(estDateTime.time);
-          
-          // Update isUrgent column for Word_Type
-          if (CONFIG.TEMPLATE_TYPE === "Word_Type" && cols.IS_URGENT) {
-            sheet.getRange(duplicateRow, cols.IS_URGENT).setValue(isUrgent ? 'YES' : 'NO');
-          }
-          
-          filesOverwritten++;
-          overwrittenFilesList.push(fileName);
+          overwrites.push({ row: duplicateRow, fileName: fileName, estDateTime: estDateTime });
         } else {
           filesSkipped++;
         }
+      } else if (queuedNewNames.has(fileName)) {
+        // Same name appears twice in this batch (e.g. .pdf and .docx) - keep the first
+        filesSkipped++;
       } else {
-        // New file, find next available row in Column B
-        let nextRow = 1;
-        for (let i = 0; i < columnBData.length; i++) {
-          if (columnBData[i][0] === '' || columnBData[i][0] === null) {
-            nextRow = i + 1;
-            break;
-          }
-        }
-        // If all rows have data, append to end
-        if (nextRow === 1) {
-          nextRow = columnBData.length + 1;
-        }
-        
-        sheet.getRange(nextRow, cols.FILE_NAME).setValue(fileName);
-        sheet.getRange(nextRow, cols.DATE_RECEIVED).setValue(estDateTime.date);
-        sheet.getRange(nextRow, cols.TIME_RECEIVED).setValue(estDateTime.time);
-        
-        // Set isUrgent column for Word_Type
-        if (CONFIG.TEMPLATE_TYPE === "Word_Type" && cols.IS_URGENT) {
-          sheet.getRange(nextRow, cols.IS_URGENT).setValue(isUrgent ? 'YES' : 'NO');
-        }
-        
-        // Update columnBData to reflect this addition for next iteration
-        if (nextRow - 1 < columnBData.length) {
-          columnBData[nextRow - 1][0] = fileName;
-        } else {
-          columnBData.push([fileName]);
-        }
-        
-        filesAdded++;
-        newFilesList.push(fileName);
+        queuedNewNames.add(fileName);
+        newFiles.push({ fileName: fileName, estDateTime: estDateTime });
       }
     });
 
+    // Pass 2: reserve rows for new files after the last File name (adding rows
+    // if needed) and confirm they're empty BEFORE anything is written
+    let placement = { startRow: 0, rowsAdded: 0 };
+    if (newFiles.length > 0) {
+      placement = prepareAppendRows_(sheet, newFiles.length);
+      assertRowsEmpty_(sheet, placement.startRow, newFiles.length);
+    }
+
+    // Pass 3: overwrite selected duplicates (E & F, plus isUrgent for Word_Type)
+    overwrites.forEach(item => {
+      sheet.getRange(item.row, cols.DATE_RECEIVED).setValue(item.estDateTime.date);
+      sheet.getRange(item.row, cols.TIME_RECEIVED).setValue(item.estDateTime.time);
+      if (CONFIG.TEMPLATE_TYPE === "Word_Type" && cols.IS_URGENT) {
+        sheet.getRange(item.row, cols.IS_URGENT).setValue(isUrgent ? 'YES' : 'NO');
+      }
+      filesOverwritten++;
+      overwrittenFilesList.push(item.fileName);
+    });
+
+    // Pass 4: write new files as one block (B, E, F, and J for Word_Type)
+    if (newFiles.length > 0) {
+      const startRow = placement.startRow;
+      const count = newFiles.length;
+      sheet.getRange(startRow, cols.FILE_NAME, count, 1).setValues(newFiles.map(f => [f.fileName]));
+      sheet.getRange(startRow, cols.DATE_RECEIVED, count, 1).setValues(newFiles.map(f => [f.estDateTime.date]));
+      sheet.getRange(startRow, cols.TIME_RECEIVED, count, 1).setValues(newFiles.map(f => [f.estDateTime.time]));
+      if (CONFIG.TEMPLATE_TYPE === "Word_Type" && cols.IS_URGENT) {
+        sheet.getRange(startRow, cols.IS_URGENT, count, 1).setValues(newFiles.map(() => [isUrgent ? 'YES' : 'NO']));
+      }
+      filesAdded = count;
+      newFiles.forEach(f => newFilesList.push(f.fileName));
+      Logger.log(`Wrote ${count} new file(s) to "${destinationTab}" rows ${startRow}-${startRow + count - 1} (${placement.rowsAdded} row(s) added)`);
+    }
+
     // At the end, calculate elapsed time
     const elapsedTime = ((new Date().getTime() - startTime) / 1000).toFixed(2);
-    
+
     return {
       success: true,
       showReceivedReport: true,
@@ -1362,6 +1480,7 @@ function processReceivedWithOverwriteCore_(selectedFileNames, allFilesData, fold
       newFiles: newFilesList,
       overwrittenFiles: overwrittenFilesList,
       totalFiles: filesAdded + filesOverwritten,
+      rowsAdded: placement.rowsAdded,
       executionTime: elapsedTime
     };
     

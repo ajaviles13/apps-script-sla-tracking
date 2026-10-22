@@ -697,13 +697,14 @@
             <div>${result.newFiles.length} NEW file${result.newFiles.length !== 1 ? 's' : ''}</div>
             <div>${result.overwrittenFiles.length} file${result.overwrittenFiles.length !== 1 ? 's' : ''} Overwritten</div>
             <div style="color: #667eea; font-weight: 600;">⏱️ Execution Time: ${result.executionTime}s</div>
+            ${result.rowsAdded > 0 ? `<div style="color: #856404; font-weight: 600;">➕ ${result.rowsAdded} line${result.rowsAdded !== 1 ? 's were' : ' was'} added to the tab to fit these files</div>` : ''}
           </div>
-          
+
           <div class="folder-path-section">
             <div class="folder-path-label">📁 Source Folder Path:</div>
             <div class="folder-path-value">${result.folderPath || 'N/A'}</div>
           </div>
-          
+
           <div class="files-list" id="filesList">
             ${generateFileListHTML(result.newFiles, result.overwrittenFiles)}
           </div>
