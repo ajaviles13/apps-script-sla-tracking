@@ -298,6 +298,9 @@
   <body>
     <div class="container">
       <h2>📂 Egnyte File Extraction</h2>
+
+      <!-- Run lock banner: shown while another extraction is running in this workbook -->
+      <div id="runStatusBanner" style="display: none; background: #fff3cd; border: 2px solid #ffeaa7; color: #856404; border-radius: 8px; padding: 12px; margin-bottom: 20px; font-size: 14px; text-align: center;"></div>
       
       <form id="extractionForm">
         <div class="form-group">
@@ -388,6 +391,62 @@
         });
       }
       
+      // ===================================================================
+      // RUN LOCK BANNER
+      // ===================================================================
+      // The server is the real check: every extraction asks for the run lease
+      // the moment Extract is clicked and is rejected straight away if another
+      // extraction is running. The banner polls so people can see that before
+      // clicking, and clears itself when the other run finishes.
+      const RUN_STATUS_POLL_MS = 5000;
+
+      function showBusyBanner(message) {
+        const banner = document.getElementById('runStatusBanner');
+        const btn = document.getElementById('submitBtn');
+        if (banner) {
+          banner.textContent = message;
+          banner.style.display = 'block';
+        }
+        if (btn) btn.disabled = true;
+      }
+
+      function clearBusyBanner() {
+        const banner = document.getElementById('runStatusBanner');
+        const btn = document.getElementById('submitBtn');
+        if (banner) banner.style.display = 'none';
+        if (btn) btn.disabled = false;
+      }
+
+      // Put the form back with the banner showing (used when the server rejects a run)
+      function showFormBusy(message) {
+        document.getElementById('loading').style.display = 'none';
+        document.getElementById('extractionForm').style.display = 'block';
+        showBusyBanner(message);
+      }
+
+      function checkRunStatus() {
+        const form = document.getElementById('extractionForm');
+        // Only check while the form is showing (not during this user's own run or a report)
+        if (!form || form.style.display === 'none') return;
+
+        google.script.run
+          .withSuccessHandler(function(status) {
+            if (status && status.busy) {
+              showBusyBanner(status.message);
+            } else {
+              clearBusyBanner();
+            }
+          })
+          .withFailureHandler(function() {
+            // Never block the form because the status check failed; the server still protects the run
+            clearBusyBanner();
+          })
+          .getRunStatus();
+      }
+
+      checkRunStatus();
+      setInterval(checkRunStatus, RUN_STATUS_POLL_MS);
+
       // Handle form submission
       document.getElementById('extractionForm').addEventListener('submit', function(e) {
         e.preventDefault();
@@ -460,6 +519,9 @@
           setTimeout(() => {
             google.script.host.close();
           }, 1000);
+        } else if (result.busy) {
+          // Another extraction is running - rejected before anything was read or written
+          showFormBusy(result.message);
         } else {
           // Show error
           document.getElementById('loading').style.display = 'none';
@@ -481,7 +543,7 @@
         google.script.run
           .withSuccessHandler(handleDeliveredSearchComplete)
           .withFailureHandler(handleDeliveredSearchError)
-          .executeDeliveredSearch(data.folderId, data.searchListData, data.destinationTab, data.startTime);
+          .executeDeliveredSearch(data.folderId, data.searchListData, data.destinationTab, data.startTime, data.runToken);
       }
       
       function handleDeliveredSearchComplete(result) {
@@ -501,7 +563,10 @@
           }, 1000);
         } else {
           // Error occurred
-          if (result.partialSuccess) {
+          if (result.busy) {
+            // Step 2 found another extraction running (only if step 1's hand-off expired)
+            showFormBusy(result.message);
+          } else if (result.partialSuccess) {
             google.script.run.showToast(result.message);
             setTimeout(() => {
               google.script.host.close();
