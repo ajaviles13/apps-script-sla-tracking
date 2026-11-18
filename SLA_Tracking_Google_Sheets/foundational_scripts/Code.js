@@ -16,7 +16,7 @@ const CONFIG = {
   // Template Type: "PDF_Type" or "Word_Type"
   // PDF_Type: Standard template without isUrgent column
   // Word_Type: Template with isUrgent column in Column J
-  TEMPLATE_TYPE: "PDF_Type",  // Change to "Word_Type" as needed
+  TEMPLATE_TYPE: "Word_Type",  // Change to "Word_Type" as needed
   
   // File extensions to remove from filenames
   FILE_EXTENSIONS_TO_REMOVE: [".pdf", ".docx", ".txt"],
@@ -61,11 +61,12 @@ function getColumnMapping() {
 }
 
 // ===================================================================
-// ROW PLACEMENT - APPEND AFTER LAST FILE NAME, ADD ROWS WHEN NEEDED
+// ROW PLACEMENT - FILL EMPTY FILE NAME ROWS, ADD ROWS WHEN NEEDED
 // ===================================================================
 // A row is "empty" when its File name cell (Column B) has no text or value.
-// New files always go directly after the last row with a File name. Gaps
-// higher up are never filled, so existing rows can't be written over.
+// Received imports fill empty rows from the top of the tab down. Rows that
+// already have a File name are never written over. If there aren't enough
+// empty rows for the whole import, the missing rows are added at the bottom.
 
 const ROW_CONFIG = {
   DATA_START_ROW: 2,          // Row 1 is the header
@@ -77,55 +78,66 @@ function isFileNameEmpty_(value) {
   return value === null || value === undefined || String(value).trim() === '';
 }
 
-// Last row (1-based) with a File name in Column B. Returns 1 (the header) if none.
-function getLastFileNameRow_(sheet) {
-  const columnB = sheet.getRange('B:B').getValues();
-  for (let i = columnB.length - 1; i >= ROW_CONFIG.DATA_START_ROW - 1; i--) {
-    if (!isFileNameEmpty_(columnB[i][0])) {
-      return i + 1;
+// All rows (1-based, top to bottom) whose File name is empty
+function findEmptyFileNameRows_(sheet) {
+  const maxRows = sheet.getMaxRows();
+  if (maxRows < ROW_CONFIG.DATA_START_ROW) return [];
+
+  const values = sheet.getRange(ROW_CONFIG.DATA_START_ROW, 2, maxRows - ROW_CONFIG.DATA_START_ROW + 1, 1).getValues();
+  const emptyRows = [];
+  values.forEach((row, i) => {
+    if (isFileNameEmpty_(row[0])) {
+      emptyRows.push(ROW_CONFIG.DATA_START_ROW + i);
     }
-  }
-  return ROW_CONFIG.DATA_START_ROW - 1;
+  });
+  return emptyRows;
 }
 
-// Makes sure `count` empty rows exist directly after the last File name and
-// returns where to write. Rows are inserted INSIDE the sheet's existing
-// ranges (above the last row) so filters, dropdowns and conditional formatting
-// grow with them; formatting, dropdowns and the formula columns are then
-// copied onto the new rows.
-function prepareAppendRows_(sheet, count) {
-  const cols = getColumnMapping();
-  const lastUsedRow = getLastFileNameRow_(sheet);
-  const startRow = lastUsedRow + 1;
-  const endRow = startRow + count - 1;
-  const maxRows = sheet.getMaxRows();
-  const rowsNeeded = endRow - maxRows;
+// Picks `count` rows to write to: empty File name rows from the top down,
+// adding rows at the bottom of the tab for any shortfall.
+// Returns { rows: [row numbers, ascending], rowsAdded }
+function reserveEmptyRows_(sheet, count) {
+  let emptyRows = findEmptyFileNameRows_(sheet);
+  let rowsAdded = 0;
 
-  if (rowsNeeded > 0) {
-    let firstNewRow;
-
-    if (maxRows < ROW_CONFIG.DATA_START_ROW) {
-      // Only the header exists - nothing to insert inside of
-      sheet.insertRowsAfter(maxRows, rowsNeeded);
-      firstNewRow = maxRows + 1;
-    } else {
-      sheet.insertRowsBefore(maxRows, rowsNeeded);
-      // The original last row is now at maxRows + rowsNeeded
-      if (lastUsedRow === maxRows) {
-        // That last row holds a file - move it back above the new blank rows
-        const shiftedRow = maxRows + rowsNeeded;
-        sheet.moveRows(sheet.getRange(`${shiftedRow}:${shiftedRow}`), maxRows);
-        firstNewRow = maxRows + 1;
-      } else {
-        firstNewRow = maxRows;
-      }
-    }
-
-    copyRowSetupToNewRows_(sheet, firstNewRow, rowsNeeded, cols);
-    Logger.log(`Added ${rowsNeeded} row(s) to "${sheet.getName()}" at rows ${firstNewRow}-${firstNewRow + rowsNeeded - 1}`);
+  if (emptyRows.length < count) {
+    rowsAdded = count - emptyRows.length;
+    addRowsAtBottom_(sheet, rowsAdded);
+    emptyRows = findEmptyFileNameRows_(sheet);
   }
 
-  return { startRow: startRow, endRow: endRow, rowsAdded: Math.max(rowsNeeded, 0) };
+  return { rows: emptyRows.slice(0, count), rowsAdded: rowsAdded };
+}
+
+// Adds `numRows` blank rows at the bottom of the tab. Rows are inserted
+// INSIDE the sheet's existing ranges (above the last row) so filters,
+// dropdowns and conditional formatting grow with them; formatting, dropdowns
+// and the formula columns are then copied onto the new rows.
+function addRowsAtBottom_(sheet, numRows) {
+  const cols = getColumnMapping();
+  const maxRows = sheet.getMaxRows();
+  let firstNewRow;
+
+  if (maxRows < ROW_CONFIG.DATA_START_ROW) {
+    // Only the header exists - nothing to insert inside of
+    sheet.insertRowsAfter(maxRows, numRows);
+    firstNewRow = maxRows + 1;
+  } else {
+    const lastRowHasFile = !isFileNameEmpty_(sheet.getRange(maxRows, cols.FILE_NAME).getValue());
+    sheet.insertRowsBefore(maxRows, numRows);
+    // The original last row is now at maxRows + numRows
+    if (lastRowHasFile) {
+      // That last row holds a file - move it back above the new blank rows
+      const shiftedRow = maxRows + numRows;
+      sheet.moveRows(sheet.getRange(`${shiftedRow}:${shiftedRow}`), maxRows);
+      firstNewRow = maxRows + 1;
+    } else {
+      firstNewRow = maxRows;
+    }
+  }
+
+  copyRowSetupToNewRows_(sheet, firstNewRow, numRows, cols);
+  Logger.log(`Added ${numRows} row(s) to "${sheet.getName()}" at rows ${firstNewRow}-${firstNewRow + numRows - 1}`);
 }
 
 // Copies formatting, dropdowns and the formula columns from a neighbouring
@@ -162,12 +174,15 @@ function copyRowSetupToNewRows_(sheet, firstNewRow, numRows, cols) {
 
 // Safety net: confirm every target row still has an empty File name right
 // before writing. If not, stop the whole import and list the rows.
-function assertRowsEmpty_(sheet, startRow, count) {
-  const values = sheet.getRange(startRow, 2, count, 1).getValues();
+function assertRowsEmpty_(sheet, rows) {
+  if (rows.length === 0) return;
+  const lastRow = rows[rows.length - 1];
+  const values = sheet.getRange(1, 2, lastRow, 1).getValues();
   const usedRows = [];
-  values.forEach((row, i) => {
-    if (!isFileNameEmpty_(row[0])) {
-      usedRows.push(`row ${startRow + i} ("${row[0]}")`);
+  rows.forEach(row => {
+    const value = values[row - 1][0];
+    if (!isFileNameEmpty_(value)) {
+      usedRows.push(`row ${row} ("${value}")`);
     }
   });
   if (usedRows.length > 0) {
@@ -176,6 +191,34 @@ function assertRowsEmpty_(sheet, startRow, count) {
       'Please try again; if this keeps happening, contact support.'
     );
   }
+}
+
+// Writes one value per row into `column` for the given (ascending) rows.
+// Consecutive rows are written together to keep the number of calls low.
+function writeColumnToRows_(sheet, rows, column, values) {
+  let i = 0;
+  while (i < rows.length) {
+    let j = i;
+    while (j + 1 < rows.length && rows[j + 1] === rows[j] + 1) {
+      j++;
+    }
+    sheet.getRange(rows[i], column, j - i + 1, 1)
+      .setValues(values.slice(i, j + 1).map(value => [value]));
+    i = j + 1;
+  }
+}
+
+// "5, 9-12, 40" - compact row list for the execution log
+function describeRows_(rows) {
+  const parts = [];
+  let i = 0;
+  while (i < rows.length) {
+    let j = i;
+    while (j + 1 < rows.length && rows[j + 1] === rows[j] + 1) j++;
+    parts.push(i === j ? `${rows[i]}` : `${rows[i]}-${rows[j]}`);
+    i = j + 1;
+  }
+  return parts.join(', ');
 }
 
 // ===================================================================
@@ -658,10 +701,6 @@ function formatSheetDateTime(dateValue, timeValue) {
 // WRITE DATA TO SHEET (FOR RECEIVED MODE)
 // ===================================================================
 
-// ===================================================================
-// WRITE DATA TO SHEET (FOR RECEIVED MODE) - MODIFIED
-// ===================================================================
-
 function writeDataToSheet(folderData, sheetName, deliveryType) {
   const ss = SpreadsheetApp.getActiveSpreadsheet();
   const sheet = ss.getSheetByName(sheetName);
@@ -686,14 +725,14 @@ function writeDataToSheet(folderData, sheetName, deliveryType) {
   
   Logger.log(`Folder path: ${folderData.path}, isUrgentFolder: ${isUrgentFolder}`);
   
-  // Place new files directly after the last row with a File name,
-  // adding rows to the tab if there aren't enough
-  const placement = prepareAppendRows_(sheet, files.length);
-  const nextRow = placement.startRow;
-  assertRowsEmpty_(sheet, nextRow, files.length);
+  // Fill rows whose File name is empty, from the top of the tab down,
+  // adding rows at the bottom only if there aren't enough empty ones
+  const placement = reserveEmptyRows_(sheet, files.length);
+  const targetRows = placement.rows;
+  assertRowsEmpty_(sheet, targetRows);
 
-  // Prepare column-specific data to write (as 2D arrays)
-  const fileNamesColumn = [];  // Column B - will be written first as the 'anchor'
+  // Prepare one value per file for each column written
+  const fileNamesColumn = [];  // Column B
   const receivedDates = [];    // Column E
   const receivedTimes = [];    // Column F
   const deliveredDates = [];   // Column G
@@ -707,66 +746,61 @@ function writeDataToSheet(folderData, sheetName, deliveryType) {
     const estDateTime = convertEpochToEST(uploadedTimestamp);
     
     // Always add File Name (Column B)
-    fileNamesColumn.push([fileName]); // Pad A with empty strings
+    fileNamesColumn.push(fileName);
     
     // Handle RECEIVED mode data
     if (deliveryType === 'Received') {
-      // Columns E, F get data, G, H get blanks
-      receivedDates.push([estDateTime.date]); // Column E
-      receivedTimes.push([estDateTime.time]); // Column F
-      deliveredDates.push(['']);              // Column G
-      deliveredTimes.push(['']);              // Column H
+      // Columns E, F get data; G, H are cleared so a reused row doesn't keep
+      // old delivery dates (which would hide it from Delivered mode)
+      receivedDates.push(estDateTime.date); // Column E
+      receivedTimes.push(estDateTime.time); // Column F
+      deliveredDates.push('');              // Column G
+      deliveredTimes.push('');              // Column H
 
       // Column J (isUrgent?) is only added if template type matches
       if (CONFIG.TEMPLATE_TYPE === "Word_Type") {
-        urgentFlags.push([isUrgentFolder ? 'YES' : 'NO']); // Column J
+        urgentFlags.push(isUrgentFolder ? 'YES' : 'NO'); // Column J
       }
       
     } else { // Handle DELIVERED mode data
       // Columns E, F get blanks, G, H get data
-      receivedDates.push(['']);              // Column E
-      receivedTimes.push(['']);              // Column F
-      deliveredDates.push([estDateTime.date]); // Column G
-      deliveredTimes.push([estDateTime.time]); // Column H
+      receivedDates.push('');              // Column E
+      receivedTimes.push('');              // Column F
+      deliveredDates.push(estDateTime.date); // Column G
+      deliveredTimes.push(estDateTime.time); // Column H
       
       // We don't write to Column J in Delivered mode in this function
     }
   });
 
-  // Determine the final row range for the write operations
-  const dataRowCount = files.length;
-  const endRow = nextRow + dataRowCount - 1;
-  
   // --- WRITE OPERATIONS ---
+  // Rows may not be next to each other (empty rows are filled where they are),
+  // so each column is written row-group by row-group.
   
-  // 1. Write the Anchor Data (B) in a single block
-  // This is the most crucial step as it defines the new rows.
-  // We use B to anchor the row and ensure the file name is in B.
-  sheet.getRange(`B${nextRow}:B${endRow}`).setValues(fileNamesColumn);
+  // 1. Column B (File Name)
+  writeColumnToRows_(sheet, targetRows, cols.FILE_NAME, fileNamesColumn);
   
-  // 2. Write Columns E and F (Date/Time Received)
-  sheet.getRange(nextRow, cols.DATE_RECEIVED, dataRowCount, 1).setValues(receivedDates);
-  sheet.getRange(nextRow, cols.TIME_RECEIVED, dataRowCount, 1).setValues(receivedTimes);
+  // 2. Columns E and F (Date/Time Received)
+  writeColumnToRows_(sheet, targetRows, cols.DATE_RECEIVED, receivedDates);
+  writeColumnToRows_(sheet, targetRows, cols.TIME_RECEIVED, receivedTimes);
   
-  // 3. Write Columns G and H (Date/Time Delivered)
-  sheet.getRange(nextRow, cols.DATE_DELIVERED, dataRowCount, 1).setValues(deliveredDates);
-  sheet.getRange(nextRow, cols.TIME_DELIVERED, dataRowCount, 1).setValues(deliveredTimes);
+  // 3. Columns G and H (Date/Time Delivered)
+  writeColumnToRows_(sheet, targetRows, cols.DATE_DELIVERED, deliveredDates);
+  writeColumnToRows_(sheet, targetRows, cols.TIME_DELIVERED, deliveredTimes);
   
   // 4. Conditionally Write Column J (isUrgent?) for Word_Type/Received
   if (CONFIG.TEMPLATE_TYPE === "Word_Type" && deliveryType === 'Received') {
-    // Column J is cols.IS_URGENT (which is 10)
-    sheet.getRange(nextRow, cols.IS_URGENT, dataRowCount, 1).setValues(urgentFlags);
-    Logger.log(`Wrote ${dataRowCount} values to Column J (isUrgent?).`);
+    writeColumnToRows_(sheet, targetRows, cols.IS_URGENT, urgentFlags);
+    Logger.log(`Wrote ${targetRows.length} values to Column J (isUrgent?).`);
   }
   
-  // This structure ensures only Columns A, B, C, D, E, F, G, H, and (conditionally) J are updated.
-  // Columns I, K, L, etc., are completely untouched, preserving any formulas or existing data.
+  // Only Columns B, E, F, G, H and (conditionally) J are written.
+  // Columns A, C, D, I, K, L, etc. are untouched, preserving any existing data or formulas.
 
-  Logger.log(`Wrote ${dataRowCount} file(s) to "${sheetName}" rows ${nextRow}-${endRow} (${placement.rowsAdded} row(s) added)`);
+  Logger.log(`Wrote ${targetRows.length} file(s) to "${sheetName}" rows ${describeRows_(targetRows)} (${placement.rowsAdded} row(s) added)`);
 
   // Return file names and how many rows had to be added to the tab
-  const fileNames = files.map(file => stripFileExtension(file.name || ''));
-  return { fileNames: fileNames, rowsAdded: placement.rowsAdded };
+  return { fileNames: fileNamesColumn, rowsAdded: placement.rowsAdded };
 }
 
 // ===================================================================
@@ -1162,9 +1196,7 @@ function updateSheetWithDeliveredFiles(foundFiles, sheetName) {
 // ===================================================================
 // MAIN PROCESS FUNCTION
 // ===================================================================
-// Called through the locked wrapper processEgnyteExtraction() in RunLock.gs
-
-function processEgnyteExtractionCore_(directLink, deliveryType, destinationTab) {
+function processEgnyteExtraction(directLink, deliveryType, destinationTab) {
   try {
     // Add at the very beginning of processEgnyteExtraction
     const startTime = new Date().getTime();
@@ -1314,9 +1346,10 @@ function processEgnyteExtractionCore_(directLink, deliveryType, destinationTab) 
 // ===================================================================
 // EXECUTE DELIVERED SEARCH (CALLED FROM FRONTEND WITH PROGRESS)
 // ===================================================================
-// Called through the locked wrapper executeDeliveredSearch() in RunLock.gs
+function executeDeliveredSearch(folderId, searchListData, destinationTab, startTime) {
+  // Fall back to timing this step alone if the dialog doesn't pass a start time
+  startTime = startTime || new Date().getTime();
 
-function executeDeliveredSearchCore_(folderId, searchListData, destinationTab, startTime) {
   try {
     const searchList = JSON.parse(searchListData);
 
@@ -1364,9 +1397,11 @@ function executeDeliveredSearchCore_(folderId, searchListData, destinationTab, s
 // ===================================================================
 // PROCESS RECEIVED WITH OVERWRITE SELECTIONS
 // ===================================================================
-// Called through the locked wrapper processReceivedWithOverwrite() in RunLock.gs
+function processReceivedWithOverwrite(selectedFileNames, allFilesData, folderPath, destinationTab, startTime) {
+  // Dialog.html doesn't pass a start time here, so time the overwrite step itself
+  // (prevents "Execution Time: NaNs" on the Received report)
+  startTime = startTime || new Date().getTime();
 
-function processReceivedWithOverwriteCore_(selectedFileNames, allFilesData, folderPath, destinationTab, startTime) {
   try {
     const ss = SpreadsheetApp.getActiveSpreadsheet();
     const sheet = ss.getSheetByName(destinationTab);
@@ -1436,12 +1471,13 @@ function processReceivedWithOverwriteCore_(selectedFileNames, allFilesData, fold
       }
     });
 
-    // Pass 2: reserve rows for new files after the last File name (adding rows
-    // if needed) and confirm they're empty BEFORE anything is written
-    let placement = { startRow: 0, rowsAdded: 0 };
+    // Pass 2: reserve rows for new files - empty File name rows from the top
+    // down, adding rows at the bottom if needed - and confirm they're empty
+    // BEFORE anything is written
+    let placement = { rows: [], rowsAdded: 0 };
     if (newFiles.length > 0) {
-      placement = prepareAppendRows_(sheet, newFiles.length);
-      assertRowsEmpty_(sheet, placement.startRow, newFiles.length);
+      placement = reserveEmptyRows_(sheet, newFiles.length);
+      assertRowsEmpty_(sheet, placement.rows);
     }
 
     // Pass 3: overwrite selected duplicates (E & F, plus isUrgent for Word_Type)
@@ -1455,19 +1491,21 @@ function processReceivedWithOverwriteCore_(selectedFileNames, allFilesData, fold
       overwrittenFilesList.push(item.fileName);
     });
 
-    // Pass 4: write new files as one block (B, E, F, and J for Word_Type)
+    // Pass 4: write new files into the reserved rows (B, E, F, clear G & H,
+    // and J for Word_Type)
     if (newFiles.length > 0) {
-      const startRow = placement.startRow;
-      const count = newFiles.length;
-      sheet.getRange(startRow, cols.FILE_NAME, count, 1).setValues(newFiles.map(f => [f.fileName]));
-      sheet.getRange(startRow, cols.DATE_RECEIVED, count, 1).setValues(newFiles.map(f => [f.estDateTime.date]));
-      sheet.getRange(startRow, cols.TIME_RECEIVED, count, 1).setValues(newFiles.map(f => [f.estDateTime.time]));
+      const rows = placement.rows;
+      writeColumnToRows_(sheet, rows, cols.FILE_NAME, newFiles.map(f => f.fileName));
+      writeColumnToRows_(sheet, rows, cols.DATE_RECEIVED, newFiles.map(f => f.estDateTime.date));
+      writeColumnToRows_(sheet, rows, cols.TIME_RECEIVED, newFiles.map(f => f.estDateTime.time));
+      writeColumnToRows_(sheet, rows, cols.DATE_DELIVERED, newFiles.map(() => ''));
+      writeColumnToRows_(sheet, rows, cols.TIME_DELIVERED, newFiles.map(() => ''));
       if (CONFIG.TEMPLATE_TYPE === "Word_Type" && cols.IS_URGENT) {
-        sheet.getRange(startRow, cols.IS_URGENT, count, 1).setValues(newFiles.map(() => [isUrgent ? 'YES' : 'NO']));
+        writeColumnToRows_(sheet, rows, cols.IS_URGENT, newFiles.map(() => isUrgent ? 'YES' : 'NO'));
       }
-      filesAdded = count;
+      filesAdded = newFiles.length;
       newFiles.forEach(f => newFilesList.push(f.fileName));
-      Logger.log(`Wrote ${count} new file(s) to "${destinationTab}" rows ${startRow}-${startRow + count - 1} (${placement.rowsAdded} row(s) added)`);
+      Logger.log(`Wrote ${filesAdded} new file(s) to "${destinationTab}" rows ${describeRows_(rows)} (${placement.rowsAdded} row(s) added)`);
     }
 
     // At the end, calculate elapsed time
